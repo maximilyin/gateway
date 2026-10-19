@@ -1,0 +1,45 @@
+GO_IMAGE ?= golang:1.27
+IMAGE    ?= gateway:dev
+
+# Go is not installed locally, so every go command runs inside the official image
+# as the current user (files stay owned by you) with host-mounted caches.
+GO = docker run --rm -t \
+	--user $(shell id -u):$(shell id -g) \
+	-e HOME=/tmp -e GOCACHE=/gocache -e GOMODCACHE=/gomod \
+	-v $(CURDIR):/src -w /src \
+	-v $(HOME)/.cache/go-build:/gocache \
+	-v $(HOME)/go/pkg/mod:/gomod \
+	$(GO_IMAGE) go
+
+.PHONY: caches fmt vet test cover tidy build docker-build docker-run
+
+caches:
+	@mkdir -p $(HOME)/.cache/go-build $(HOME)/go/pkg/mod
+
+fmt: caches
+	$(GO) fmt ./...
+
+vet: caches
+	$(GO) vet ./...
+
+test: caches
+	$(GO) test -race -count=1 ./...
+
+cover: caches
+	$(GO) test -race -count=1 -coverprofile=coverage.out ./...
+	$(GO) tool cover -func=coverage.out
+
+tidy: caches
+	$(GO) mod tidy
+
+build: caches
+	$(GO) build -o bin/gateway ./cmd/gateway
+
+docker-build:
+	docker build -t $(IMAGE) .
+
+docker-run: docker-build
+	docker run --rm -p 8080:8080 \
+		--add-host=host.docker.internal:host-gateway \
+		-v $(CURDIR)/configs/gateway.yaml:/etc/gateway/config.yaml:ro \
+		$(IMAGE)

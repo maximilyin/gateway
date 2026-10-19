@@ -1,0 +1,147 @@
+// Package config loads and validates the gateway configuration from YAML.
+package config
+
+import (
+	"errors"
+	"fmt"
+	"io"
+	"log/slog"
+	"net/url"
+	"os"
+	"time"
+
+	"go.yaml.in/yaml/v3"
+)
+
+type Config struct {
+	Server   ServerConfig   `yaml:"server"`
+	Log      LogConfig      `yaml:"log"`
+	Upstream UpstreamConfig `yaml:"upstream"`
+}
+
+type ServerConfig struct {
+	Listen string `yaml:"listen"`
+
+	// ReadHeaderTimeout bounds how long a client may take to send request headers
+	// (slowloris protection). ReadTimeout also covers the body.
+	ReadHeaderTimeout time.Duration `yaml:"read_header_timeout"`
+	ReadTimeout       time.Duration `yaml:"read_timeout"`
+	// WriteTimeout caps the whole response, including the time spent waiting for the
+	// upstream, so it must be larger than any upstream timeout. Zero disables it.
+	WriteTimeout time.Duration `yaml:"write_timeout"`
+	IdleTimeout  time.Duration `yaml:"idle_timeout"`
+
+	ShutdownTimeout time.Duration `yaml:"shutdown_timeout"`
+	MaxBodyBytes    int64         `yaml:"max_body_bytes"`
+}
+
+type LogConfig struct {
+	Level slog.Level `yaml:"level"`
+}
+
+type UpstreamConfig struct {
+	URL     string        `yaml:"url"`
+	Timeout time.Duration `yaml:"timeout"`
+}
+
+// Default returns a config with every optional field filled in. Parse decodes YAML
+// on top of it, so anything missing in the file keeps its default value.
+func Default() *Config {
+	return &Config{
+		Server: ServerConfig{
+			Listen:            ":8080",
+			ReadHeaderTimeout: 5 * time.Second,
+			ReadTimeout:       30 * time.Second,
+			WriteTimeout:      60 * time.Second,
+			IdleTimeout:       120 * time.Second,
+			ShutdownTimeout:   15 * time.Second,
+			MaxBodyBytes:      10 << 20, // 10 MiB
+		},
+		Log: LogConfig{Level: slog.LevelInfo},
+		Upstream: UpstreamConfig{
+			Timeout: 30 * time.Second,
+		},
+	}
+}
+
+func Load(path string) (*Config, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, fmt.Errorf("open config: %w", err)
+	}
+	defer f.Close()
+
+	return Parse(f)
+}
+
+func Parse(r io.Reader) (*Config, error) {
+	cfg := Default()
+
+	dec := yaml.NewDecoder(r)
+	dec.KnownFields(true)
+	if err := dec.Decode(cfg); err != nil {
+		if errors.Is(err, io.EOF) {
+			return nil, errors.New("parse config: file is empty")
+		}
+		return nil, fmt.Errorf("parse config: %w", err)
+	}
+
+	if err := cfg.Validate(); err != nil {
+		return nil, fmt.Errorf("invalid config: %w", err)
+	}
+	return cfg, nil
+}
+
+// Validate reports every problem at once instead of stopping at the first one.
+func (c *Config) Validate() error {
+	var errs []error
+
+	s := c.Server
+	if s.Listen == "" {
+		errs = append(errs, errors.New("server.listen is required"))
+	}
+	if s.ReadHeaderTimeout <= 0 {
+		errs = append(errs, errors.New("server.read_header_timeout must be positive"))
+	}
+	if s.ReadTimeout < 0 || s.WriteTimeout < 0 || s.IdleTimeout < 0 {
+		errs = append(errs, errors.New("server timeouts must not be negative"))
+	}
+	if s.ShutdownTimeout <= 0 {
+		errs = append(errs, errors.New("server.shutdown_timeout must be positive"))
+	}
+	if s.MaxBodyBytes <= 0 {
+		errs = append(errs, errors.New("server.max_body_bytes must be positive"))
+	}
+
+	u := c.Upstream
+	if _, err := ParseUpstreamURL(u.URL); err != nil {
+		errs = append(errs, fmt.Errorf("upstream.url: %w", err))
+	}
+	if u.Timeout <= 0 {
+		errs = append(errs, errors.New("upstream.timeout must be positive"))
+	}
+	if s.WriteTimeout > 0 && u.Timeout >= s.WriteTimeout {
+		errs = append(errs, fmt.Errorf(
+			"upstream.timeout (%s) must be less than server.write_timeout (%s)",
+			u.Timeout, s.WriteTimeout))
+	}
+
+	return errors.Join(errs...)
+}
+
+func ParseUpstreamURL(raw string) (*url.URL, error) {
+	if raw == "" {
+		return nil, errors.New("is required")
+	}
+	u, err := url.Parse(raw)
+	if err != nil {
+		return nil, err
+	}
+	if u.Scheme != "http" && u.Scheme != "https" {
+		return nil, fmt.Errorf("scheme must be http or https, got %q", u.Scheme)
+	}
+	if u.Host == "" {
+		return nil, errors.New("host is required")
+	}
+	return u, nil
+}

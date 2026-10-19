@@ -1,0 +1,15 @@
+server:
+  listen: ":8080"
+  read_header_timeout: 5s
+  read_timeout: 30s
+  write_timeout: 60s
+  idle_timeout: 120s
+  shutdown_timeout: 15s
+  max_body_bytes: 10485760 # 10 MiB
+
+log:
+  level: info
+
+upstream:
+  url: http://host.docker.internal:9000
+  timeout: 30s

@@ -1,0 +1,5 @@
+.git
+.cursor
+bin
+coverage.out
+*.test
