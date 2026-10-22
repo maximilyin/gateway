@@ -9,6 +9,16 @@ import (
 	"time"
 )
 
+// minimal is the smallest valid config body; tests append or override sections.
+const minimal = `
+upstreams:
+  users:
+    url: http://users-svc:8080
+routes:
+  - match: /service/users/*
+    upstream: users
+`
+
 func TestParse_Valid(t *testing.T) {
 	const yml = `
 server:
@@ -17,9 +27,20 @@ server:
   max_body_bytes: 1024
 log:
   level: debug
-upstream:
-  url: http://users-svc:8080
-  timeout: 3s
+upstreams:
+  users:
+    url: http://users-svc:8080
+    timeout: 3s
+  orders:
+    url: http://orders-svc:8080
+routes:
+  - name: users-login
+    match: /service/users/login
+    methods: [POST]
+    upstream: users
+    strip_prefix: /service/users
+  - match: /service/orders/*
+    upstream: orders
 `
 	cfg, err := Parse(strings.NewReader(yml))
 	if err != nil {
@@ -38,8 +59,28 @@ upstream:
 	if cfg.Log.Level != slog.LevelDebug {
 		t.Errorf("Log.Level = %s, want DEBUG", cfg.Log.Level)
 	}
-	if cfg.Upstream.Timeout != 3*time.Second {
-		t.Errorf("Upstream.Timeout = %s, want 3s", cfg.Upstream.Timeout)
+
+	if got := cfg.Upstreams["users"].Timeout; got != 3*time.Second {
+		t.Errorf("users timeout = %s, want 3s", got)
+	}
+	if got := cfg.Upstreams["orders"].Timeout; got != DefaultUpstreamTimeout {
+		t.Errorf("orders timeout = %s, want default %s", got, DefaultUpstreamTimeout)
+	}
+
+	if len(cfg.Routes) != 2 {
+		t.Fatalf("got %d routes, want 2", len(cfg.Routes))
+	}
+	want := RouteConfig{
+		Name:        "users-login",
+		Match:       "/service/users/login",
+		Methods:     []string{"POST"},
+		Upstream:    "users",
+		StripPrefix: "/service/users",
+	}
+	got := cfg.Routes[0]
+	if got.Name != want.Name || got.Match != want.Match || got.Upstream != want.Upstream ||
+		got.StripPrefix != want.StripPrefix || len(got.Methods) != 1 || got.Methods[0] != "POST" {
+		t.Errorf("route[0] = %+v, want %+v", got, want)
 	}
 
 	// Fields absent from the YAML must keep their defaults.
@@ -65,43 +106,68 @@ func TestParse_Errors(t *testing.T) {
 		},
 		{
 			name:    "unknown field",
-			yml:     "upstream:\n  url: http://a\n  timeot: 1s\n",
+			yml:     "upstreams:\n  a:\n    url: http://a\n    timeot: 1s\n",
 			wantErr: "field timeot not found",
 		},
 		{
-			name:    "missing upstream url",
+			name:    "no upstreams and routes",
 			yml:     "server:\n  listen: \":8080\"\n",
-			wantErr: "upstream.url: is required",
+			wantErr: "at least one upstream is required",
+		},
+		{
+			name:    "missing upstream url",
+			yml:     "upstreams:\n  a:\n    timeout: 1s\nroutes:\n  - match: /*\n    upstream: a\n",
+			wantErr: "upstreams.a.url: is required",
 		},
 		{
 			name:    "bad scheme",
-			yml:     "upstream:\n  url: ftp://a\n",
+			yml:     "upstreams:\n  a:\n    url: ftp://a\nroutes:\n  - match: /*\n    upstream: a\n",
 			wantErr: `scheme must be http or https, got "ftp"`,
 		},
 		{
 			name:    "missing host",
-			yml:     "upstream:\n  url: http://\n",
+			yml:     "upstreams:\n  a:\n    url: http://\nroutes:\n  - match: /*\n    upstream: a\n",
 			wantErr: "host is required",
 		},
 		{
 			name:    "bad duration",
-			yml:     "upstream:\n  url: http://a\n  timeout: soon\n",
+			yml:     "upstreams:\n  a:\n    url: http://a\n    timeout: soon\n",
 			wantErr: "parse config",
 		},
 		{
 			name:    "bad log level",
-			yml:     "log:\n  level: loud\nupstream:\n  url: http://a\n",
+			yml:     "log:\n  level: loud\n" + minimal,
 			wantErr: "parse config",
 		},
 		{
 			name:    "upstream timeout exceeds write timeout",
-			yml:     "server:\n  write_timeout: 5s\nupstream:\n  url: http://a\n  timeout: 10s\n",
-			wantErr: "must be less than server.write_timeout",
+			yml:     "server:\n  write_timeout: 5s\nupstreams:\n  a:\n    url: http://a\n    timeout: 10s\nroutes:\n  - match: /*\n    upstream: a\n",
+			wantErr: "upstreams.a.timeout (10s) must be less than server.write_timeout (5s)",
 		},
 		{
 			name:    "non-positive body limit",
-			yml:     "server:\n  max_body_bytes: 0\nupstream:\n  url: http://a\n",
+			yml:     "server:\n  max_body_bytes: 0\n" + minimal,
 			wantErr: "server.max_body_bytes must be positive",
+		},
+		{
+			name:    "no routes",
+			yml:     "upstreams:\n  a:\n    url: http://a\n",
+			wantErr: "at least one route is required",
+		},
+		{
+			name:    "route without match",
+			yml:     "upstreams:\n  a:\n    url: http://a\nroutes:\n  - upstream: a\n",
+			wantErr: "routes[0].match is required",
+		},
+		{
+			name:    "route without upstream",
+			yml:     "upstreams:\n  a:\n    url: http://a\nroutes:\n  - match: /*\n",
+			wantErr: "routes[0].upstream is required",
+		},
+		{
+			name:    "route with unknown upstream",
+			yml:     "upstreams:\n  a:\n    url: http://a\nroutes:\n  - match: /*\n    upstream: b\n",
+			wantErr: `routes[0].upstream: unknown upstream "b"`,
 		},
 	}
 
@@ -121,13 +187,16 @@ func TestParse_Errors(t *testing.T) {
 func TestValidate_ReportsAllErrors(t *testing.T) {
 	cfg := Default()
 	cfg.Server.Listen = ""
-	cfg.Upstream.URL = ""
 
 	err := cfg.Validate()
 	if err == nil {
 		t.Fatal("Validate succeeded, want error")
 	}
-	for _, want := range []string{"server.listen is required", "upstream.url: is required"} {
+	for _, want := range []string{
+		"server.listen is required",
+		"at least one upstream is required",
+		"at least one route is required",
+	} {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("error %q does not contain %q", err, want)
 		}
@@ -136,7 +205,7 @@ func TestValidate_ReportsAllErrors(t *testing.T) {
 
 func TestLoad(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "gateway.yaml")
-	if err := os.WriteFile(path, []byte("upstream:\n  url: http://a\n"), 0o600); err != nil {
+	if err := os.WriteFile(path, []byte(minimal), 0o600); err != nil {
 		t.Fatal(err)
 	}
 

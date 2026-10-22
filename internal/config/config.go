@@ -6,17 +6,20 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"maps"
 	"net/url"
 	"os"
+	"slices"
 	"time"
 
 	"go.yaml.in/yaml/v3"
 )
 
 type Config struct {
-	Server   ServerConfig   `yaml:"server"`
-	Log      LogConfig      `yaml:"log"`
-	Upstream UpstreamConfig `yaml:"upstream"`
+	Server    ServerConfig              `yaml:"server"`
+	Log       LogConfig                 `yaml:"log"`
+	Upstreams map[string]UpstreamConfig `yaml:"upstreams"`
+	Routes    []RouteConfig             `yaml:"routes"`
 }
 
 type ServerConfig struct {
@@ -44,6 +47,18 @@ type UpstreamConfig struct {
 	Timeout time.Duration `yaml:"timeout"`
 }
 
+// RouteConfig maps a path pattern to an upstream. Pattern syntax and precedence
+// are described in package router.
+type RouteConfig struct {
+	Name        string   `yaml:"name"`
+	Match       string   `yaml:"match"`
+	Methods     []string `yaml:"methods"`
+	Upstream    string   `yaml:"upstream"`
+	StripPrefix string   `yaml:"strip_prefix"`
+}
+
+const DefaultUpstreamTimeout = 30 * time.Second
+
 // Default returns a config with every optional field filled in. Parse decodes YAML
 // on top of it, so anything missing in the file keeps its default value.
 func Default() *Config {
@@ -58,9 +73,17 @@ func Default() *Config {
 			MaxBodyBytes:      10 << 20, // 10 MiB
 		},
 		Log: LogConfig{Level: slog.LevelInfo},
-		Upstream: UpstreamConfig{
-			Timeout: 30 * time.Second,
-		},
+	}
+}
+
+// applyDefaults fills defaults that Default cannot pre-populate: entries of maps
+// and slices only exist after the YAML has been decoded.
+func (c *Config) applyDefaults() {
+	for name, u := range c.Upstreams {
+		if u.Timeout == 0 {
+			u.Timeout = DefaultUpstreamTimeout
+			c.Upstreams[name] = u
+		}
 	}
 }
 
@@ -86,6 +109,7 @@ func Parse(r io.Reader) (*Config, error) {
 		return nil, fmt.Errorf("parse config: %w", err)
 	}
 
+	cfg.applyDefaults()
 	if err := cfg.Validate(); err != nil {
 		return nil, fmt.Errorf("invalid config: %w", err)
 	}
@@ -113,17 +137,37 @@ func (c *Config) Validate() error {
 		errs = append(errs, errors.New("server.max_body_bytes must be positive"))
 	}
 
-	u := c.Upstream
-	if _, err := ParseUpstreamURL(u.URL); err != nil {
-		errs = append(errs, fmt.Errorf("upstream.url: %w", err))
+	if len(c.Upstreams) == 0 {
+		errs = append(errs, errors.New("at least one upstream is required"))
 	}
-	if u.Timeout <= 0 {
-		errs = append(errs, errors.New("upstream.timeout must be positive"))
+	// Map iteration order is random in Go; sort names so errors are deterministic.
+	for _, name := range slices.Sorted(maps.Keys(c.Upstreams)) {
+		u := c.Upstreams[name]
+		if _, err := ParseUpstreamURL(u.URL); err != nil {
+			errs = append(errs, fmt.Errorf("upstreams.%s.url: %w", name, err))
+		}
+		if u.Timeout <= 0 {
+			errs = append(errs, fmt.Errorf("upstreams.%s.timeout must be positive", name))
+		}
+		if s.WriteTimeout > 0 && u.Timeout >= s.WriteTimeout {
+			errs = append(errs, fmt.Errorf(
+				"upstreams.%s.timeout (%s) must be less than server.write_timeout (%s)",
+				name, u.Timeout, s.WriteTimeout))
+		}
 	}
-	if s.WriteTimeout > 0 && u.Timeout >= s.WriteTimeout {
-		errs = append(errs, fmt.Errorf(
-			"upstream.timeout (%s) must be less than server.write_timeout (%s)",
-			u.Timeout, s.WriteTimeout))
+
+	if len(c.Routes) == 0 {
+		errs = append(errs, errors.New("at least one route is required"))
+	}
+	for i, r := range c.Routes {
+		if r.Match == "" {
+			errs = append(errs, fmt.Errorf("routes[%d].match is required", i))
+		}
+		if r.Upstream == "" {
+			errs = append(errs, fmt.Errorf("routes[%d].upstream is required", i))
+		} else if _, ok := c.Upstreams[r.Upstream]; !ok {
+			errs = append(errs, fmt.Errorf("routes[%d].upstream: unknown upstream %q", i, r.Upstream))
+		}
 	}
 
 	return errors.Join(errs...)

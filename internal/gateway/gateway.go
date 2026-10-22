@@ -1,4 +1,5 @@
-// Package gateway assembles the HTTP handler: health endpoints, middleware and proxy.
+// Package gateway assembles the HTTP handler: health endpoints, middleware, router
+// and proxies.
 package gateway
 
 import (
@@ -10,6 +11,7 @@ import (
 	"github.com/maximilyin/gateway/internal/config"
 	"github.com/maximilyin/gateway/internal/middleware"
 	"github.com/maximilyin/gateway/internal/proxy"
+	"github.com/maximilyin/gateway/internal/router"
 )
 
 type Gateway struct {
@@ -18,20 +20,46 @@ type Gateway struct {
 }
 
 func New(cfg *config.Config, logger *slog.Logger) (*Gateway, error) {
-	target, err := config.ParseUpstreamURL(cfg.Upstream.URL)
+	// One proxy per upstream, so all routes to the same service share one
+	// connection pool.
+	proxies := make(map[string]*proxy.Proxy, len(cfg.Upstreams))
+	for name, u := range cfg.Upstreams {
+		target, err := config.ParseUpstreamURL(u.URL)
+		if err != nil {
+			return nil, fmt.Errorf("upstream %q: %w", name, err)
+		}
+		proxies[name] = proxy.New(target, u.Timeout, logger.With("upstream", name))
+	}
+
+	routes := make([]router.Route, 0, len(cfg.Routes))
+	for _, rc := range cfg.Routes {
+		p, ok := proxies[rc.Upstream]
+		if !ok {
+			return nil, fmt.Errorf("route %q: unknown upstream %q", rc.Match, rc.Upstream)
+		}
+		routes = append(routes, router.Route{
+			Name:        rc.Name,
+			Pattern:     rc.Match,
+			Methods:     rc.Methods,
+			StripPrefix: rc.StripPrefix,
+			Handler:     p,
+		})
+	}
+	rt, err := router.New(routes)
 	if err != nil {
-		return nil, fmt.Errorf("upstream url: %w", err)
+		return nil, fmt.Errorf("routes: %w", err)
 	}
 
 	g := &Gateway{}
 	g.ready.Store(true)
 
-	p := proxy.New(target, cfg.Upstream.Timeout, logger)
-
+	// ServeMux serves the gateway's own endpoints and hands everything else to the
+	// router. It also cleans paths first ("/a/../b" is redirected to "/b"), so a
+	// route can never be bypassed with dot segments.
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", g.healthz)
 	mux.HandleFunc("GET /readyz", g.readyz)
-	mux.Handle("/", middleware.MaxBody(cfg.Server.MaxBodyBytes)(p))
+	mux.Handle("/", middleware.MaxBody(cfg.Server.MaxBodyBytes)(rt))
 
 	g.handler = middleware.Chain(mux,
 		middleware.RequestID,

@@ -54,7 +54,8 @@ func run() error {
 
 	serveErr := make(chan error, 1)
 	go func() {
-		logger.Info("gateway listening", "addr", srv.Addr, "upstream", cfg.Upstream.URL)
+		logger.Info("gateway listening", "addr", srv.Addr,
+			"upstreams", len(cfg.Upstreams), "routes", len(cfg.Routes))
 		serveErr <- srv.ListenAndServe()
 	}()
 

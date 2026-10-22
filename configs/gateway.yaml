@@ -10,6 +10,30 @@ server:
 log:
   level: info
 
-upstream:
-  url: http://host.docker.internal:9000
-  timeout: 30s
+# Internal services the gateway can forward to. Timeout defaults to 30s.
+upstreams:
+  users:
+    url: http://host.docker.internal:9001
+    timeout: 5s
+  orders:
+    url: http://host.docker.internal:9002
+    timeout: 10s
+
+# Patterns: "/exact/path" or "/prefix/*" (matches /prefix and everything below).
+# Precedence does not depend on order: exact match first, then the longest prefix.
+routes:
+  - name: users
+    match: /service/users/*
+    upstream: users
+    strip_prefix: /service/users
+
+  - name: users-login
+    match: /service/users/login
+    methods: [POST]
+    upstream: users
+    strip_prefix: /service/users
+
+  - name: orders
+    match: /service/orders/*
+    upstream: orders
+    strip_prefix: /service/orders
