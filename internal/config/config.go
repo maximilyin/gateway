@@ -17,11 +17,12 @@ import (
 )
 
 type Config struct {
-	Server    ServerConfig              `yaml:"server"`
-	Log       LogConfig                 `yaml:"log"`
-	Sessions  SessionsConfig            `yaml:"sessions"`
-	Upstreams map[string]UpstreamConfig `yaml:"upstreams"`
-	Routes    []RouteConfig             `yaml:"routes"`
+	Server     ServerConfig              `yaml:"server"`
+	Log        LogConfig                 `yaml:"log"`
+	Sessions   SessionsConfig            `yaml:"sessions"`
+	RateLimits RateLimitsConfig          `yaml:"rate_limits"`
+	Upstreams  map[string]UpstreamConfig `yaml:"upstreams"`
+	Routes     []RouteConfig             `yaml:"routes"`
 }
 
 type ServerConfig struct {
@@ -57,6 +58,27 @@ type SessionsConfig struct {
 	CleanupInterval time.Duration `yaml:"cleanup_interval"`
 }
 
+// RateLimitConfig is one token bucket: burst requests may pass immediately,
+// then requests refill at rps per second.
+type RateLimitConfig struct {
+	RPS   float64 `yaml:"rps"`
+	Burst int     `yaml:"burst"`
+}
+
+// RateLimitsConfig holds the process-wide guard, the per-client default, the
+// per-IP session issuance limit, and optional named policies routes can select.
+type RateLimitsConfig struct {
+	Global       RateLimitConfig            `yaml:"global"`
+	Default      RateLimitConfig            `yaml:"default"`
+	SessionIssue RateLimitConfig            `yaml:"session_issue"`
+	Policies     map[string]RateLimitConfig `yaml:"policies"`
+	// IdleTTL is how long an unused bucket is kept. After that the client starts
+	// from a full bucket again.
+	IdleTTL         time.Duration `yaml:"idle_ttl"`
+	CleanupInterval time.Duration `yaml:"cleanup_interval"`
+	MaxKeys         int           `yaml:"max_keys"`
+}
+
 type UpstreamConfig struct {
 	URL     string        `yaml:"url"`
 	Timeout time.Duration `yaml:"timeout"`
@@ -70,6 +92,8 @@ type RouteConfig struct {
 	Methods     []string `yaml:"methods"`
 	Upstream    string   `yaml:"upstream"`
 	StripPrefix string   `yaml:"strip_prefix"`
+	// RateLimit names a policy under rate_limits.policies. Empty uses default.
+	RateLimit string `yaml:"rate_limit"`
 	// RequireSession documents that the route is session-scoped. Every matched
 	// route already receives a session: the first request without a live token
 	// is issued one before the upstream call.
@@ -99,6 +123,14 @@ func Default() *Config {
 			MaxLifetime:     24 * time.Hour,
 			MaxSessions:     100_000,
 			CleanupInterval: time.Minute,
+		},
+		RateLimits: RateLimitsConfig{
+			Global:          RateLimitConfig{RPS: 5000, Burst: 10000},
+			Default:         RateLimitConfig{RPS: 10, Burst: 20},
+			SessionIssue:    RateLimitConfig{RPS: 1, Burst: 5},
+			IdleTTL:         30 * time.Minute,
+			CleanupInterval: time.Minute,
+			MaxKeys:         100_000,
 		},
 	}
 }
@@ -165,6 +197,7 @@ func (c *Config) Validate() error {
 	}
 
 	errs = append(errs, c.Sessions.validate()...)
+	errs = append(errs, c.RateLimits.validate()...)
 
 	if len(c.Upstreams) == 0 {
 		errs = append(errs, errors.New("at least one upstream is required"))
@@ -197,9 +230,52 @@ func (c *Config) Validate() error {
 		} else if _, ok := c.Upstreams[r.Upstream]; !ok {
 			errs = append(errs, fmt.Errorf("routes[%d].upstream: unknown upstream %q", i, r.Upstream))
 		}
+		if r.RateLimit != "" {
+			if _, ok := c.RateLimits.Policies[r.RateLimit]; !ok {
+				errs = append(errs, fmt.Errorf("routes[%d].rate_limit: unknown policy %q", i, r.RateLimit))
+			}
+		}
 	}
 
 	return errors.Join(errs...)
+}
+
+func (c RateLimitsConfig) validate() []error {
+	var errs []error
+	errs = append(errs, validateLimit("rate_limits.global", c.Global)...)
+	errs = append(errs, validateLimit("rate_limits.default", c.Default)...)
+	errs = append(errs, validateLimit("rate_limits.session_issue", c.SessionIssue)...)
+	if c.IdleTTL <= 0 {
+		errs = append(errs, errors.New("rate_limits.idle_ttl must be positive"))
+	}
+	if c.CleanupInterval <= 0 {
+		errs = append(errs, errors.New("rate_limits.cleanup_interval must be positive"))
+	}
+	if c.MaxKeys <= 0 {
+		errs = append(errs, errors.New("rate_limits.max_keys must be positive"))
+	}
+	for _, name := range slices.Sorted(maps.Keys(c.Policies)) {
+		switch name {
+		case "global", "default", "session_issue":
+			errs = append(errs, fmt.Errorf("rate_limits.policies.%s: reserved name", name))
+		}
+		if strings.ContainsAny(name, " \t\r\n") || name == "" {
+			errs = append(errs, fmt.Errorf("rate_limits.policies: invalid name %q", name))
+		}
+		errs = append(errs, validateLimit("rate_limits.policies."+name, c.Policies[name])...)
+	}
+	return errs
+}
+
+func validateLimit(where string, l RateLimitConfig) []error {
+	var errs []error
+	if l.RPS <= 0 {
+		errs = append(errs, fmt.Errorf("%s.rps must be positive", where))
+	}
+	if l.Burst < 1 {
+		errs = append(errs, fmt.Errorf("%s.burst must be at least 1", where))
+	}
+	return errs
 }
 
 func (s SessionsConfig) validate() []error {

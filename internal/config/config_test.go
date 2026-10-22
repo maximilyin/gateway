@@ -35,12 +35,17 @@ upstreams:
     url: http://orders-svc:8080
 sessions:
   ttl: 5m
+rate_limits:
+  default: { rps: 4, burst: 8 }
+  policies:
+    login: { rps: 0.5, burst: 2 }
 routes:
   - name: users-login
     match: /service/users/login
     methods: [POST]
     upstream: users
     strip_prefix: /service/users
+    rate_limit: login
   - match: /service/orders/*
     upstream: orders
     require_session: true
@@ -91,6 +96,18 @@ routes:
 	}
 	if cfg.Sessions.TTL != 5*time.Minute {
 		t.Errorf("Sessions.TTL = %s, want 5m", cfg.Sessions.TTL)
+	}
+	if cfg.Routes[0].RateLimit != "login" || cfg.Routes[1].RateLimit != "" {
+		t.Errorf("rate_limit = %q, %q; want login, empty", cfg.Routes[0].RateLimit, cfg.Routes[1].RateLimit)
+	}
+	if cfg.RateLimits.Default.RPS != 4 || cfg.RateLimits.Default.Burst != 8 {
+		t.Errorf("default limit = %+v, want 4 rps / burst 8", cfg.RateLimits.Default)
+	}
+	if got := cfg.RateLimits.Policies["login"]; got.RPS != 0.5 || got.Burst != 2 {
+		t.Errorf("login policy = %+v, want 0.5 rps / burst 2", got)
+	}
+	if cfg.RateLimits.Global.Burst != Default().RateLimits.Global.Burst {
+		t.Errorf("global burst = %d, want default", cfg.RateLimits.Global.Burst)
 	}
 
 	// Fields absent from the YAML must keep their defaults.
@@ -201,6 +218,26 @@ func TestParse_Errors(t *testing.T) {
 			name:    "non-positive max sessions",
 			yml:     "sessions:\n  max_sessions: 0\n" + minimal,
 			wantErr: "sessions.max_sessions must be positive",
+		},
+		{
+			name:    "non-positive rate",
+			yml:     "rate_limits:\n  default:\n    rps: 0\n    burst: 1\n" + minimal,
+			wantErr: "rate_limits.default.rps must be positive",
+		},
+		{
+			name:    "burst below one",
+			yml:     "rate_limits:\n  global:\n    rps: 1\n    burst: 0\n" + minimal,
+			wantErr: "rate_limits.global.burst must be at least 1",
+		},
+		{
+			name:    "reserved policy name",
+			yml:     "rate_limits:\n  policies:\n    default:\n      rps: 1\n      burst: 1\n" + minimal,
+			wantErr: "rate_limits.policies.default: reserved name",
+		},
+		{
+			name:    "route with unknown policy",
+			yml:     minimal + "  - match: /x\n    upstream: users\n    rate_limit: missing\n",
+			wantErr: `routes[1].rate_limit: unknown policy "missing"`,
 		},
 		{
 			name:    "route with unknown upstream",

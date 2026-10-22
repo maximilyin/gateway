@@ -39,6 +39,7 @@ func sessionGateway(t *testing.T, clk clock.Clock) (*Gateway, <-chan upstreamSee
 		{Match: "/private/*", Upstream: "svc", RequireSession: true},
 		{Match: "/public/*", Upstream: "svc"},
 	}
+	widenRateLimits(cfg)
 	return newTestGateway(t, cfg, WithClock(clk)), seen
 }
 

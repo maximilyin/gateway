@@ -49,6 +49,24 @@ Explicit operations on `sessions.endpoint` (default `/auth/session`):
 
 `GET` and `DELETE` do not issue a replacement. The next API request that still carries the old token receives a new session.
 
+Creating a session, whether by that `POST` or automatically on an API route, spends the `session_issue` bucket of the client IP. Reusing a token does not.
+
+## Rate limits
+
+Limits are token buckets. `burst` is how many requests can pass immediately. `rps` is how many tokens return each second. A rejected request returns `429` with `Retry-After`, `X-RateLimit-Limit`, and `X-RateLimit-Remaining`.
+
+| Bucket | Key | When |
+|---|---|---|
+| `global` | the whole process | every limited request, after its own bucket passes |
+| `default` | session | a matched route that does not set `rate_limit` |
+| named policy | session | a route whose `rate_limit` names it. Several routes with the same name share one bucket per session |
+| `default` | client IP | a path that matches no route, and `GET` or `DELETE` of the session endpoint |
+| `session_issue` | client IP | creating a session |
+
+`GET /healthz` and `GET /readyz` are not limited.
+
+Buckets live in process memory. One unused for `idle_ttl` is deleted, and the next request starts from a full bucket. `max_keys` caps how many buckets are stored; past that, a new key returns `503`.
+
 ## Operations
 
 - `GET /healthz` — the process is up. Always `200`.
@@ -86,4 +104,4 @@ In the example config, `upstreams.*.url` points at `host.docker.internal`, a ser
 
 ## Not implemented yet
 
-Rate limits and the circuit breaker are planned. This code does not have them.
+The circuit breaker is planned. This code does not have it.

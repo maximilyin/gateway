@@ -24,6 +24,21 @@ sessions:
   max_sessions: 100000  # memory guard; issuing beyond it returns 503
   cleanup_interval: 1m
 
+# Token buckets. burst is how many requests can pass at once, rps refills the bucket.
+# global is one bucket for the whole process. default applies to every route that
+# does not name a policy, per session. The same policy name on several routes is a
+# group: those routes share one bucket per session. session_issue limits new
+# sessions per client IP.
+rate_limits:
+  global: { rps: 5000, burst: 10000 }
+  default: { rps: 10, burst: 20 }
+  session_issue: { rps: 1, burst: 5 }
+  idle_ttl: 30m
+  cleanup_interval: 1m
+  max_keys: 100000
+  policies:
+    login: { rps: 1, burst: 3 }
+
 # Internal services the gateway can forward to. Timeout defaults to 30s.
 upstreams:
   users:
@@ -46,6 +61,7 @@ routes:
     methods: [POST]
     upstream: users
     strip_prefix: /service/users
+    rate_limit: login
 
   - name: orders
     match: /service/orders/*

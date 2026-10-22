@@ -34,7 +34,16 @@ func singleUpstream(url string) *config.Config {
 		"svc": {URL: url, Timeout: time.Second},
 	}
 	cfg.Routes = []config.RouteConfig{{Match: "/*", Upstream: "svc"}}
+	widenRateLimits(cfg)
 	return cfg
+}
+
+// widenRateLimits keeps tests that are not about limiting off the default buckets.
+func widenRateLimits(cfg *config.Config) {
+	big := config.RateLimitConfig{RPS: 1_000_000, Burst: 1_000_000}
+	cfg.RateLimits.Global = big
+	cfg.RateLimits.Default = big
+	cfg.RateLimits.SessionIssue = big
 }
 
 // echoServer replies with its name and the path it received.

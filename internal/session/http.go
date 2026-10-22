@@ -20,10 +20,32 @@ type HTTP struct {
 	manager     *Manager
 	tokenHeader string
 	logger      *slog.Logger
+	// issueGuard runs before a session is created. A false result means the guard
+	// already wrote the HTTP response.
+	issueGuard func(http.ResponseWriter, *http.Request) bool
+	// postGuard runs only for the explicit POST endpoint, after issueGuard.
+	// Automatic issuance on an API route does not use it: that request is limited
+	// again once the session exists.
+	postGuard func(http.ResponseWriter, *http.Request) bool
 }
 
 func NewHTTP(m *Manager, tokenHeader string, logger *slog.Logger) *HTTP {
 	return &HTTP{manager: m, tokenHeader: tokenHeader, logger: logger}
+}
+
+// SetIssueGuard installs a check for every new session, including automatic
+// issuance on the first API request and POST to the session endpoint.
+func (h *HTTP) SetIssueGuard(fn func(http.ResponseWriter, *http.Request) bool) {
+	h.issueGuard = fn
+}
+
+// SetPostGuard installs a check that runs only inside Issue, after SetIssueGuard.
+func (h *HTTP) SetPostGuard(fn func(http.ResponseWriter, *http.Request) bool) {
+	h.postGuard = fn
+}
+
+func (h *HTTP) allowIssue(w http.ResponseWriter, r *http.Request) bool {
+	return h.issueGuard == nil || h.issueGuard(w, r)
 }
 
 type sessionResponse struct {
@@ -38,6 +60,12 @@ type errorResponse struct {
 
 // Issue handles POST: creates a session and returns its token (201).
 func (h *HTTP) Issue(w http.ResponseWriter, r *http.Request) {
+	if !h.allowIssue(w, r) {
+		return
+	}
+	if h.postGuard != nil && !h.postGuard(w, r) {
+		return
+	}
 	token, s, err := h.manager.Issue(r.Context(), clientIP(r))
 	if err != nil {
 		h.storeError(w, r, err)
@@ -95,6 +123,9 @@ func (h *HTTP) Attach(next http.Handler) http.Handler {
 			}
 		}
 		if sess.ID == "" {
+			if !h.allowIssue(w, r) {
+				return
+			}
 			issued, sess, err = h.manager.Issue(r.Context(), clientIP(r))
 			if err != nil {
 				h.storeError(w, r, err)
