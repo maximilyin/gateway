@@ -3,7 +3,7 @@ IMAGE    ?= gateway:dev
 
 # Go is not installed locally, so every go command runs inside the official image
 # as the current user (files stay owned by you) with host-mounted caches.
-GO = docker run --rm -t \
+GO = docker run --rm \
 	--user $(shell id -u):$(shell id -g) \
 	-e HOME=/tmp -e GOCACHE=/gocache -e GOMODCACHE=/gomod \
 	-v $(CURDIR):/src -w /src \
@@ -11,7 +11,7 @@ GO = docker run --rm -t \
 	-v $(HOME)/go/pkg/mod:/gomod \
 	$(GO_IMAGE) go
 
-.PHONY: caches fmt vet test cover tidy build docker-build docker-run
+.PHONY: caches fmt vet staticcheck deadcode test check cover tidy build docker-build docker-run
 
 caches:
 	@mkdir -p $(HOME)/.cache/go-build $(HOME)/go/pkg/mod
@@ -22,8 +22,18 @@ fmt: caches
 vet: caches
 	$(GO) vet ./...
 
+staticcheck: caches
+	$(GO) tool staticcheck ./...
+
+# deadcode prints findings and still exits 0, so an empty report is the pass condition.
+deadcode: caches
+	@out=$$($(GO) tool deadcode -test ./...); \
+	if [ -n "$$out" ]; then printf '%s\n' "$$out"; exit 1; fi
+
 test: caches
 	$(GO) test -race -count=1 ./...
+
+check: build vet staticcheck deadcode test
 
 cover: caches
 	$(GO) test -race -count=1 -coverprofile=coverage.out ./...

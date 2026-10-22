@@ -13,15 +13,16 @@ import (
 	"github.com/maximilyin/gateway/internal/middleware"
 )
 
-func newTestGateway(t *testing.T, cfg *config.Config) *Gateway {
+func newTestGateway(t *testing.T, cfg *config.Config, opts ...Option) *Gateway {
 	t.Helper()
 	if err := cfg.Validate(); err != nil {
 		t.Fatal(err)
 	}
-	gw, err := New(cfg, slog.New(slog.DiscardHandler))
+	gw, err := New(cfg, slog.New(slog.DiscardHandler), opts...)
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(gw.Close)
 	return gw
 }
 

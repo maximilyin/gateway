@@ -33,6 +33,8 @@ upstreams:
     timeout: 3s
   orders:
     url: http://orders-svc:8080
+sessions:
+  ttl: 5m
 routes:
   - name: users-login
     match: /service/users/login
@@ -41,6 +43,7 @@ routes:
     strip_prefix: /service/users
   - match: /service/orders/*
     upstream: orders
+    require_session: true
 `
 	cfg, err := Parse(strings.NewReader(yml))
 	if err != nil {
@@ -83,8 +86,18 @@ routes:
 		t.Errorf("route[0] = %+v, want %+v", got, want)
 	}
 
+	if cfg.Routes[0].RequireSession || !cfg.Routes[1].RequireSession {
+		t.Errorf("require_session = %v, %v; want false, true", cfg.Routes[0].RequireSession, cfg.Routes[1].RequireSession)
+	}
+	if cfg.Sessions.TTL != 5*time.Minute {
+		t.Errorf("Sessions.TTL = %s, want 5m", cfg.Sessions.TTL)
+	}
+
 	// Fields absent from the YAML must keep their defaults.
 	def := Default()
+	if cfg.Sessions.Header != def.Sessions.Header || cfg.Sessions.Endpoint != def.Sessions.Endpoint {
+		t.Errorf("sessions header/endpoint = %q %q, want defaults", cfg.Sessions.Header, cfg.Sessions.Endpoint)
+	}
 	if cfg.Server.IdleTimeout != def.Server.IdleTimeout {
 		t.Errorf("IdleTimeout = %s, want default %s", cfg.Server.IdleTimeout, def.Server.IdleTimeout)
 	}
@@ -163,6 +176,31 @@ func TestParse_Errors(t *testing.T) {
 			name:    "route without upstream",
 			yml:     "upstreams:\n  a:\n    url: http://a\nroutes:\n  - match: /*\n",
 			wantErr: "routes[0].upstream is required",
+		},
+		{
+			name:    "session endpoint with wildcard",
+			yml:     "sessions:\n  endpoint: /auth/{id}\n" + minimal,
+			wantErr: "sessions.endpoint",
+		},
+		{
+			name:    "session endpoint with trailing slash",
+			yml:     "sessions:\n  endpoint: /auth/\n" + minimal,
+			wantErr: "sessions.endpoint",
+		},
+		{
+			name:    "session header with colon",
+			yml:     "sessions:\n  header: \"X-Token:\"\n" + minimal,
+			wantErr: "is not a valid header name",
+		},
+		{
+			name:    "max lifetime below ttl",
+			yml:     "sessions:\n  ttl: 1h\n  max_lifetime: 30m\n" + minimal,
+			wantErr: "sessions.max_lifetime (30m0s) must not be less than sessions.ttl (1h0m0s)",
+		},
+		{
+			name:    "non-positive max sessions",
+			yml:     "sessions:\n  max_sessions: 0\n" + minimal,
+			wantErr: "sessions.max_sessions must be positive",
 		},
 		{
 			name:    "route with unknown upstream",

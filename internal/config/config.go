@@ -10,6 +10,7 @@ import (
 	"net/url"
 	"os"
 	"slices"
+	"strings"
 	"time"
 
 	"go.yaml.in/yaml/v3"
@@ -18,6 +19,7 @@ import (
 type Config struct {
 	Server    ServerConfig              `yaml:"server"`
 	Log       LogConfig                 `yaml:"log"`
+	Sessions  SessionsConfig            `yaml:"sessions"`
 	Upstreams map[string]UpstreamConfig `yaml:"upstreams"`
 	Routes    []RouteConfig             `yaml:"routes"`
 }
@@ -42,6 +44,19 @@ type LogConfig struct {
 	Level slog.Level `yaml:"level"`
 }
 
+type SessionsConfig struct {
+	// Endpoint serves POST (issue), GET (info) and DELETE (revoke).
+	Endpoint string `yaml:"endpoint"`
+	// Header is the request header that carries the session token.
+	Header string `yaml:"header"`
+	// TTL is the idle timeout, extended on every use up to MaxLifetime.
+	TTL         time.Duration `yaml:"ttl"`
+	MaxLifetime time.Duration `yaml:"max_lifetime"`
+	// MaxSessions bounds memory use; issuing beyond it fails with 503.
+	MaxSessions     int           `yaml:"max_sessions"`
+	CleanupInterval time.Duration `yaml:"cleanup_interval"`
+}
+
 type UpstreamConfig struct {
 	URL     string        `yaml:"url"`
 	Timeout time.Duration `yaml:"timeout"`
@@ -55,6 +70,10 @@ type RouteConfig struct {
 	Methods     []string `yaml:"methods"`
 	Upstream    string   `yaml:"upstream"`
 	StripPrefix string   `yaml:"strip_prefix"`
+	// RequireSession documents that the route is session-scoped. Every matched
+	// route already receives a session: the first request without a live token
+	// is issued one before the upstream call.
+	RequireSession bool `yaml:"require_session"`
 }
 
 const DefaultUpstreamTimeout = 30 * time.Second
@@ -73,6 +92,14 @@ func Default() *Config {
 			MaxBodyBytes:      10 << 20, // 10 MiB
 		},
 		Log: LogConfig{Level: slog.LevelInfo},
+		Sessions: SessionsConfig{
+			Endpoint:        "/auth/session",
+			Header:          "X-Session-Token",
+			TTL:             30 * time.Minute,
+			MaxLifetime:     24 * time.Hour,
+			MaxSessions:     100_000,
+			CleanupInterval: time.Minute,
+		},
 	}
 }
 
@@ -137,6 +164,8 @@ func (c *Config) Validate() error {
 		errs = append(errs, errors.New("server.max_body_bytes must be positive"))
 	}
 
+	errs = append(errs, c.Sessions.validate()...)
+
 	if len(c.Upstreams) == 0 {
 		errs = append(errs, errors.New("at least one upstream is required"))
 	}
@@ -171,6 +200,44 @@ func (c *Config) Validate() error {
 	}
 
 	return errors.Join(errs...)
+}
+
+func (s SessionsConfig) validate() []error {
+	var errs []error
+	if !validEndpoint(s.Endpoint) {
+		errs = append(errs, fmt.Errorf("sessions.endpoint %q must be a plain absolute path like /auth/session", s.Endpoint))
+	}
+	if s.Header == "" || strings.ContainsAny(s.Header, " :\t\r\n") {
+		errs = append(errs, fmt.Errorf("sessions.header %q is not a valid header name", s.Header))
+	}
+	if s.TTL <= 0 {
+		errs = append(errs, errors.New("sessions.ttl must be positive"))
+	}
+	if s.MaxLifetime < s.TTL {
+		errs = append(errs, fmt.Errorf("sessions.max_lifetime (%s) must not be less than sessions.ttl (%s)", s.MaxLifetime, s.TTL))
+	}
+	if s.MaxSessions <= 0 {
+		errs = append(errs, errors.New("sessions.max_sessions must be positive"))
+	}
+	if s.CleanupInterval <= 0 {
+		errs = append(errs, errors.New("sessions.cleanup_interval must be positive"))
+	}
+	return errs
+}
+
+// validEndpoint accepts paths made of letters, digits and "/-._~", so they can be
+// used verbatim in http.ServeMux patterns (which give "{", "}" special meaning).
+func validEndpoint(p string) bool {
+	if len(p) < 2 || p[0] != '/' || strings.HasSuffix(p, "/") || strings.Contains(p, "//") {
+		return false
+	}
+	for i := 0; i < len(p); i++ {
+		c := p[i]
+		if !('a' <= c && c <= 'z' || 'A' <= c && c <= 'Z' || '0' <= c && c <= '9' || strings.IndexByte("/-._~", c) >= 0) {
+			return false
+		}
+	}
+	return true
 }
 
 func ParseUpstreamURL(raw string) (*url.URL, error) {

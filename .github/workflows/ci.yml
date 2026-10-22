@@ -1,0 +1,44 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    name: build, analyze, test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Build
+        run: go build ./...
+
+      - name: Vet
+        run: go vet ./...
+
+      # Dialyzer analog: bugs, misuse of the standard library, simplifications.
+      - name: Staticcheck
+        run: go tool staticcheck ./...
+
+      # xref analog: functions unreachable from any main or test.
+      # deadcode prints findings and still exits 0, so an empty report is the pass condition.
+      - name: Deadcode
+        run: |
+          out=$(go tool deadcode -test ./...)
+          printf '%s\n' "$out"
+          test -z "$out"
+
+      - name: Test
+        run: go test -race -count=1 ./...

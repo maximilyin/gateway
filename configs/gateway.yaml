@@ -10,6 +10,20 @@ server:
 log:
   level: info
 
+# Sessions are issued automatically on the first request to any configured route
+# when the client has no live token. The token comes back in the response header
+# <header>; the client sends it on later requests and stays on the same session.
+# POST <endpoint> still issues a token explicitly. GET describes it, DELETE revokes it.
+# A revoked or expired token presented to an API route is replaced with a new session
+# and the original request still goes through. GET/DELETE keep returning 401.
+sessions:
+  endpoint: /auth/session
+  header: X-Session-Token
+  ttl: 30m              # idle timeout, extended on use
+  max_lifetime: 24h     # hard cap regardless of activity
+  max_sessions: 100000  # memory guard; issuing beyond it returns 503
+  cleanup_interval: 1m
+
 # Internal services the gateway can forward to. Timeout defaults to 30s.
 upstreams:
   users:
@@ -37,3 +51,4 @@ routes:
     match: /service/orders/*
     upstream: orders
     strip_prefix: /service/orders
+    require_session: true
