@@ -74,6 +74,9 @@ routes:
 	if got := cfg.Upstreams["orders"].Timeout; got != DefaultUpstreamTimeout {
 		t.Errorf("orders timeout = %s, want default %s", got, DefaultUpstreamTimeout)
 	}
+	if got := cfg.Upstreams["orders"].Breaker; got != DefaultBreaker() {
+		t.Errorf("orders breaker = %+v, want defaults %+v", got, DefaultBreaker())
+	}
 
 	if len(cfg.Routes) != 2 {
 		t.Fatalf("got %d routes, want 2", len(cfg.Routes))
@@ -238,6 +241,11 @@ func TestParse_Errors(t *testing.T) {
 			name:    "route with unknown policy",
 			yml:     minimal + "  - match: /x\n    upstream: users\n    rate_limit: missing\n",
 			wantErr: `routes[1].rate_limit: unknown policy "missing"`,
+		},
+		{
+			name:    "negative breaker threshold",
+			yml:     "upstreams:\n  a:\n    url: http://a\n    circuit_breaker:\n      failure_threshold: -1\nroutes:\n  - match: /*\n    upstream: a\n",
+			wantErr: "circuit_breaker.failure_threshold must be positive",
 		},
 		{
 			name:    "route with unknown upstream",

@@ -67,6 +67,16 @@ Limits are token buckets. `burst` is how many requests can pass immediately. `rp
 
 Buckets live in process memory. One unused for `idle_ttl` is deleted, and the next request starts from a full bucket. `max_keys` caps how many buckets are stored; past that, a new key returns `503`.
 
+## Circuit breaker
+
+Each upstream has one breaker, shared by every route that forwards to it.
+
+- **Closed.** Requests are forwarded. Consecutive upstream failures are counted. A success resets the count. A `4xx` from the upstream is a success: the service answered. A client cancel and a body the gateway rejects itself are ignored.
+- **Open.** After `failure_threshold` consecutive failures (`5xx`, timeout, or connection error) the breaker opens for `open_timeout`. Requests get `503` and `Retry-After`, and the upstream is not called.
+- **Half-open.** When the timeout elapses, up to `half_open_max` probes are forwarded. That many successes close the breaker. Any probe failure opens it again for another `open_timeout`.
+
+The breaker lives in process memory. A restart starts it closed.
+
 ## Operations
 
 - `GET /healthz` — the process is up. Always `200`.
@@ -74,6 +84,7 @@ Buckets live in process memory. One unused for `idle_ttl` is deleted, and the ne
 - Every request has an `X-Request-ID`. A valid client value is kept; otherwise a new one is generated. It is on the response, in the logs, and on the upstream request.
 - A body larger than `server.max_body_bytes` returns `413`.
 - No connection to the upstream returns `502`. An upstream timeout returns `504`.
+- An open circuit breaker returns `503` without calling the upstream.
 - `SIGTERM` or `Ctrl+C` stops accepting connections and waits for in-flight requests up to `server.shutdown_timeout`.
 - Logs are JSON on stdout (`log.level`).
 
@@ -101,7 +112,3 @@ Versions of `staticcheck` and `deadcode` are pinned in `go.mod` (`go tool ...`).
 The runtime image is distroless and the process is not root. Inside the container the config is `/etc/gateway/config.yaml`.
 
 In the example config, `upstreams.*.url` points at `host.docker.internal`, a service on the host machine.
-
-## Not implemented yet
-
-The circuit breaker is planned. This code does not have it.

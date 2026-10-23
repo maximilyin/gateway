@@ -8,8 +8,12 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/maximilyin/gateway/internal/breaker"
+	"github.com/maximilyin/gateway/internal/clock"
 )
 
 func newTestProxy(t *testing.T, upstreamURL string, timeout time.Duration) *Proxy {
@@ -18,7 +22,7 @@ func newTestProxy(t *testing.T, upstreamURL string, timeout time.Duration) *Prox
 	if err != nil {
 		t.Fatal(err)
 	}
-	return New(target, timeout, slog.New(slog.DiscardHandler))
+	return New(target, timeout, slog.New(slog.DiscardHandler), nil)
 }
 
 func TestProxy_ForwardsRequest(t *testing.T) {
@@ -155,5 +159,69 @@ func TestProxy_BodyTooLarge_Returns413(t *testing.T) {
 
 	if rec.Code != http.StatusRequestEntityTooLarge {
 		t.Errorf("status = %d, want 413", rec.Code)
+	}
+}
+
+func TestProxy_CircuitBreaker(t *testing.T) {
+	var hits atomic.Int64
+	var status atomic.Int64
+	status.Store(http.StatusInternalServerError)
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		hits.Add(1)
+		w.WriteHeader(int(status.Load()))
+	}))
+	defer upstream.Close()
+
+	clk := clock.NewFake(time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC))
+	br := breaker.New(breaker.Settings{
+		FailureThreshold: 2,
+		OpenTimeout:      time.Minute,
+		HalfOpenMax:      1,
+	}, clk, slog.New(slog.DiscardHandler))
+
+	target, err := url.Parse(upstream.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := New(target, time.Second, slog.New(slog.DiscardHandler), br)
+
+	call := func() int {
+		rec := httptest.NewRecorder()
+		p.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/x", nil))
+		return rec.Code
+	}
+
+	if code := call(); code != http.StatusInternalServerError {
+		t.Fatalf("first failure status = %d, want 500", code)
+	}
+	if code := call(); code != http.StatusInternalServerError {
+		t.Fatalf("second failure status = %d, want 500", code)
+	}
+	if hits.Load() != 2 {
+		t.Fatalf("hits = %d, want 2", hits.Load())
+	}
+	rec := httptest.NewRecorder()
+	p.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/x", nil))
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("open breaker status = %d, want 503", rec.Code)
+	}
+	if rec.Header().Get("Retry-After") == "" {
+		t.Fatal("open breaker did not set Retry-After")
+	}
+	if hits.Load() != 2 {
+		t.Fatalf("open breaker still called upstream, hits = %d", hits.Load())
+	}
+
+	// A client error from a healthy service must not open the breaker.
+	status.Store(http.StatusBadRequest)
+	clk.Advance(time.Minute)
+	if call() != http.StatusBadRequest {
+		t.Fatal("half-open probe was not forwarded")
+	}
+	if br.State() != breaker.Closed {
+		t.Fatalf("state after 400 probe = %s, want closed", br.State())
+	}
+	if call() != http.StatusBadRequest {
+		t.Fatal("closed breaker refused a request")
 	}
 }

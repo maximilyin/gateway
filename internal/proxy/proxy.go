@@ -9,8 +9,10 @@ import (
 	"net/http"
 	"net/http/httputil"
 	"net/url"
+	"strconv"
 	"time"
 
+	"github.com/maximilyin/gateway/internal/breaker"
 	"github.com/maximilyin/gateway/internal/middleware"
 )
 
@@ -19,10 +21,11 @@ type Proxy struct {
 	rp      *httputil.ReverseProxy
 	timeout time.Duration
 	logger  *slog.Logger
+	breaker *breaker.Breaker
 }
 
-func New(target *url.URL, timeout time.Duration, logger *slog.Logger) *Proxy {
-	p := &Proxy{timeout: timeout, logger: logger}
+func New(target *url.URL, timeout time.Duration, logger *slog.Logger, br *breaker.Breaker) *Proxy {
+	p := &Proxy{timeout: timeout, logger: logger, breaker: br}
 
 	p.rp = &httputil.ReverseProxy{
 		// Rewrite runs on a copy of the incoming request (pr.Out). Before it is
@@ -42,10 +45,73 @@ func New(target *url.URL, timeout time.Duration, logger *slog.Logger) *Proxy {
 }
 
 func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	var permit breaker.Permit
+	if p.breaker != nil {
+		var retry time.Duration
+		var ok bool
+		permit, retry, ok = p.breaker.Allow()
+		if !ok {
+			p.reject(w, retry)
+			return
+		}
+	}
+
 	ctx, cancel := context.WithTimeout(r.Context(), p.timeout)
 	defer cancel()
 
-	p.rp.ServeHTTP(w, r.WithContext(ctx))
+	capw := &statusCapture{ResponseWriter: w}
+	p.rp.ServeHTTP(capw, r.WithContext(ctx))
+	if p.breaker != nil {
+		p.breaker.Report(permit, classify(capw.status))
+	}
+}
+
+func classify(status int) breaker.Result {
+	switch {
+	case status == 0 || status == http.StatusRequestEntityTooLarge:
+		return breaker.Ignored
+	case status >= 500:
+		return breaker.Failure
+	default:
+		return breaker.Success
+	}
+}
+
+func (p *Proxy) reject(w http.ResponseWriter, retry time.Duration) {
+	secs := int((retry + time.Second - 1) / time.Second)
+	if secs < 1 {
+		secs = 1
+	}
+	w.Header().Set("Retry-After", strconv.Itoa(secs))
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", "no-store")
+	w.WriteHeader(http.StatusServiceUnavailable)
+	_, _ = w.Write([]byte(`{"error":"upstream unavailable"}` + "\n"))
+}
+
+// statusCapture remembers the status written by ReverseProxy or its ErrorHandler
+// and still exposes Flush and Hijack through Unwrap.
+type statusCapture struct {
+	http.ResponseWriter
+	status int
+}
+
+func (c *statusCapture) WriteHeader(code int) {
+	if c.status == 0 {
+		c.status = code
+	}
+	c.ResponseWriter.WriteHeader(code)
+}
+
+func (c *statusCapture) Write(b []byte) (int, error) {
+	if c.status == 0 {
+		c.status = http.StatusOK
+	}
+	return c.ResponseWriter.Write(b)
+}
+
+func (c *statusCapture) Unwrap() http.ResponseWriter {
+	return c.ResponseWriter
 }
 
 // handleError picks the status code the client sees when the upstream call fails.

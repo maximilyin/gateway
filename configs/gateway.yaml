@@ -40,10 +40,18 @@ rate_limits:
     login: { rps: 1, burst: 3 }
 
 # Internal services the gateway can forward to. Timeout defaults to 30s.
+# One circuit breaker per upstream, shared by every route that uses it.
+# failure_threshold consecutive 5xx, timeouts, or connection errors open it.
+# 4xx responses do not count. While open, the gateway returns 503 and does not
+# call the service. After open_timeout, half_open_max probes are allowed through.
 upstreams:
   users:
     url: http://host.docker.internal:9001
     timeout: 5s
+    circuit_breaker:
+      failure_threshold: 5
+      open_timeout: 30s
+      half_open_max: 1
   orders:
     url: http://host.docker.internal:9002
     timeout: 10s

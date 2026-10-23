@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"sync/atomic"
 
+	"github.com/maximilyin/gateway/internal/breaker"
 	"github.com/maximilyin/gateway/internal/clock"
 	"github.com/maximilyin/gateway/internal/config"
 	"github.com/maximilyin/gateway/internal/middleware"
@@ -49,7 +50,13 @@ func New(cfg *config.Config, logger *slog.Logger, opts ...Option) (*Gateway, err
 		if err != nil {
 			return nil, fmt.Errorf("upstream %q: %w", name, err)
 		}
-		proxies[name] = proxy.New(target, u.Timeout, logger.With("upstream", name))
+		bc := u.Breaker.WithDefaults()
+		br := breaker.New(breaker.Settings{
+			FailureThreshold: bc.FailureThreshold,
+			OpenTimeout:      bc.OpenTimeout,
+			HalfOpenMax:      bc.HalfOpenMax,
+		}, o.clock, logger.With("upstream", name))
+		proxies[name] = proxy.New(target, u.Timeout, logger.With("upstream", name), br)
 	}
 
 	// Both stores start a sweeper goroutine. Close them if a later step fails.

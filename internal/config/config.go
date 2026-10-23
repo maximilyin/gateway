@@ -82,6 +82,39 @@ type RateLimitsConfig struct {
 type UpstreamConfig struct {
 	URL     string        `yaml:"url"`
 	Timeout time.Duration `yaml:"timeout"`
+	Breaker BreakerConfig `yaml:"circuit_breaker"`
+}
+
+// BreakerConfig controls how an upstream is taken out of rotation after failures.
+// Zero values mean the defaults from DefaultBreaker.
+type BreakerConfig struct {
+	FailureThreshold int           `yaml:"failure_threshold"`
+	OpenTimeout      time.Duration `yaml:"open_timeout"`
+	HalfOpenMax      int           `yaml:"half_open_max"`
+}
+
+// DefaultBreaker is used when an upstream omits circuit_breaker or leaves a field at zero.
+func DefaultBreaker() BreakerConfig {
+	return BreakerConfig{
+		FailureThreshold: 5,
+		OpenTimeout:      30 * time.Second,
+		HalfOpenMax:      1,
+	}
+}
+
+// WithDefaults replaces zero fields with DefaultBreaker values.
+func (b BreakerConfig) WithDefaults() BreakerConfig {
+	def := DefaultBreaker()
+	if b.FailureThreshold == 0 {
+		b.FailureThreshold = def.FailureThreshold
+	}
+	if b.OpenTimeout == 0 {
+		b.OpenTimeout = def.OpenTimeout
+	}
+	if b.HalfOpenMax == 0 {
+		b.HalfOpenMax = def.HalfOpenMax
+	}
+	return b
 }
 
 // RouteConfig maps a path pattern to an upstream. Pattern syntax and precedence
@@ -141,8 +174,9 @@ func (c *Config) applyDefaults() {
 	for name, u := range c.Upstreams {
 		if u.Timeout == 0 {
 			u.Timeout = DefaultUpstreamTimeout
-			c.Upstreams[name] = u
 		}
+		u.Breaker = u.Breaker.WithDefaults()
+		c.Upstreams[name] = u
 	}
 }
 
@@ -216,6 +250,7 @@ func (c *Config) Validate() error {
 				"upstreams.%s.timeout (%s) must be less than server.write_timeout (%s)",
 				name, u.Timeout, s.WriteTimeout))
 		}
+		errs = append(errs, validateBreaker("upstreams."+name+".circuit_breaker", u.Breaker)...)
 	}
 
 	if len(c.Routes) == 0 {
@@ -263,6 +298,21 @@ func (c RateLimitsConfig) validate() []error {
 			errs = append(errs, fmt.Errorf("rate_limits.policies: invalid name %q", name))
 		}
 		errs = append(errs, validateLimit("rate_limits.policies."+name, c.Policies[name])...)
+	}
+	return errs
+}
+
+func validateBreaker(where string, b BreakerConfig) []error {
+	// Zero means "use the default" for configs that have not been through applyDefaults.
+	var errs []error
+	if b.FailureThreshold < 0 {
+		errs = append(errs, fmt.Errorf("%s.failure_threshold must be positive", where))
+	}
+	if b.OpenTimeout < 0 {
+		errs = append(errs, fmt.Errorf("%s.open_timeout must be positive", where))
+	}
+	if b.HalfOpenMax < 0 {
+		errs = append(errs, fmt.Errorf("%s.half_open_max must be positive", where))
 	}
 	return errs
 }
