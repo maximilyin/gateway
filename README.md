@@ -95,9 +95,12 @@ Go does not have to be installed locally. Tests and the binary build run inside 
 ```sh
 make check         # build, vet, staticcheck, deadcode, tests
 make test          # go test -race ./...
+make e2e           # client, gateway, and internal service in Docker
 make docker-build  # image gateway:dev
 make docker-run    # :8080, config configs/gateway.yaml
 ```
+
+`make e2e` builds three containers on one network. The client calls the gateway. The gateway proxies `/api/*` and `/limited/*` to the mock service. The client also calls the mock directly to switch it between success and HTTP 500 and to count how many proxied requests arrived. The run checks session issuance, the per-session rate limit, and the circuit breaker (three failures, then `503` with no further calls, then a successful probe after `open_timeout`). GitHub Actions runs the same compose file.
 
 GitHub Actions (`.github/workflows/ci.yml`) runs the same checks on every push and pull request. The Go compiler already rejects ill-typed code. On top of that:
 

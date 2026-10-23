@@ -28,11 +28,9 @@ jobs:
       - name: Vet
         run: go vet ./...
 
-      # Dialyzer analog: bugs, misuse of the standard library, simplifications.
       - name: Staticcheck
         run: go tool staticcheck ./...
 
-      # xref analog: functions unreachable from any main or test.
       # deadcode prints findings and still exits 0, so an empty report is the pass condition.
       - name: Deadcode
         run: |
@@ -42,3 +40,12 @@ jobs:
 
       - name: Test
         run: go test -race -count=1 ./...
+
+  e2e:
+    name: client, gateway, internal service
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: End to end
+        run: make e2e

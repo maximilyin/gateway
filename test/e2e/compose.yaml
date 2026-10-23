@@ -1,0 +1,32 @@
+# Client, gateway, and the internal service share one network.
+# The client talks to the gateway, and to the mock only to flip its mode and
+# read how many proxied requests actually arrived.
+services:
+  mock:
+    build:
+      context: ../..
+      dockerfile: test/mockservice/Dockerfile
+    init: true
+
+  gateway:
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    command: ["-config", "/etc/gateway/config.yaml"]
+    volumes:
+      - ./gateway.yaml:/etc/gateway/config.yaml:ro
+    depends_on:
+      - mock
+    init: true
+
+  client:
+    build:
+      context: ../..
+      dockerfile: test/e2e/Dockerfile
+    environment:
+      GATEWAY_URL: http://gateway:8080
+      MOCK_URL: http://mock:8080
+    depends_on:
+      - gateway
+      - mock
+    init: true

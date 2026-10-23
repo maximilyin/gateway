@@ -3,3 +3,4 @@
 bin
 coverage.out
 *.test
+test/e2e/compose.yaml

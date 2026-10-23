@@ -1,0 +1,34 @@
+server:
+  listen: ":8080"
+  write_timeout: 10s
+  shutdown_timeout: 5s
+
+log:
+  level: info
+
+rate_limits:
+  global: { rps: 5000, burst: 5000 }
+  default: { rps: 1000, burst: 1000 }
+  session_issue: { rps: 100, burst: 100 }
+  policies:
+    tight: { rps: 1, burst: 2 }
+
+upstreams:
+  mock:
+    url: http://mock:8080
+    timeout: 2s
+    circuit_breaker:
+      failure_threshold: 3
+      open_timeout: 2s
+      half_open_max: 1
+
+routes:
+  - name: api
+    match: /api/*
+    upstream: mock
+    strip_prefix: /api
+  - name: limited
+    match: /limited/*
+    upstream: mock
+    strip_prefix: /limited
+    rate_limit: tight

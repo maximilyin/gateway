@@ -11,7 +11,7 @@ GO = docker run --rm \
 	-v $(HOME)/go/pkg/mod:/gomod \
 	$(GO_IMAGE) go
 
-.PHONY: caches fmt vet staticcheck deadcode test check cover tidy build docker-build docker-run
+.PHONY: caches fmt vet staticcheck deadcode test check cover tidy build docker-build docker-run e2e
 
 caches:
 	@mkdir -p $(HOME)/.cache/go-build $(HOME)/go/pkg/mod
@@ -53,3 +53,10 @@ docker-run: docker-build
 		--add-host=host.docker.internal:host-gateway \
 		-v $(CURDIR)/configs/gateway.yaml:/etc/gateway/config.yaml:ro \
 		$(IMAGE)
+
+# Three containers: client, gateway, and the internal mock service.
+e2e:
+	docker compose -f test/e2e/compose.yaml up --build --abort-on-container-exit --exit-code-from client; \
+	code=$$?; \
+	docker compose -f test/e2e/compose.yaml down -v; \
+	exit $$code
