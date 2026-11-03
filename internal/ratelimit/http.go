@@ -22,12 +22,13 @@ const (
 // Default is the per-client policy used when a route does not name one.
 // SessionIssue limits how often one IP may create a session.
 type Limiter struct {
-	store  Store
-	global Limit
-	def    Limit
-	issue  Limit
-	named  map[string]Limit
-	logger *slog.Logger
+	store    Store
+	global   Limit
+	def      Limit
+	issue    Limit
+	named    map[string]Limit
+	logger   *slog.Logger
+	onReject func(policy string)
 }
 
 func New(store Store, global, def, issue Limit, named map[string]Limit, logger *slog.Logger) *Limiter {
@@ -35,6 +36,12 @@ func New(store Store, global, def, issue Limit, named map[string]Limit, logger *
 		named = map[string]Limit{}
 	}
 	return &Limiter{store: store, global: global, def: def, issue: issue, named: named, logger: logger}
+}
+
+// SetOnReject reports each rejected request by policy name. Call it before
+// serving; a nil function disables the report.
+func (l *Limiter) SetOnReject(fn func(policy string)) {
+	l.onReject = fn
 }
 
 // AllowIssue spends one token from the per-IP session-creation bucket.
@@ -108,6 +115,9 @@ func (l *Limiter) take(w http.ResponseWriter, r *http.Request, lim Limit, policy
 		return false
 	}
 	if !d.Allowed {
+		if l.onReject != nil {
+			l.onReject(policy)
+		}
 		writeLimited(w, d)
 		return false
 	}

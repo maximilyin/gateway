@@ -18,10 +18,11 @@ import (
 
 // Proxy forwards every request to a single upstream with a per-request timeout.
 type Proxy struct {
-	rp      *httputil.ReverseProxy
-	timeout time.Duration
-	logger  *slog.Logger
-	breaker *breaker.Breaker
+	rp       *httputil.ReverseProxy
+	timeout  time.Duration
+	logger   *slog.Logger
+	breaker  *breaker.Breaker
+	onReject func()
 }
 
 func New(target *url.URL, timeout time.Duration, logger *slog.Logger, br *breaker.Breaker) *Proxy {
@@ -42,6 +43,12 @@ func New(target *url.URL, timeout time.Duration, logger *slog.Logger, br *breake
 		FlushInterval: -1,
 	}
 	return p
+}
+
+// SetOnBreakerReject reports a request that was refused because the breaker was
+// open or had no probe slot left. Call it before serving.
+func (p *Proxy) SetOnBreakerReject(fn func()) {
+	p.onReject = fn
 }
 
 func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -78,6 +85,9 @@ func classify(status int) breaker.Result {
 }
 
 func (p *Proxy) reject(w http.ResponseWriter, retry time.Duration) {
+	if p.onReject != nil {
+		p.onReject()
+	}
 	secs := int((retry + time.Second - 1) / time.Second)
 	if secs < 1 {
 		secs = 1

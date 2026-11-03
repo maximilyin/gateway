@@ -11,6 +11,7 @@ import (
 	"github.com/maximilyin/gateway/internal/breaker"
 	"github.com/maximilyin/gateway/internal/clock"
 	"github.com/maximilyin/gateway/internal/config"
+	"github.com/maximilyin/gateway/internal/metrics"
 	"github.com/maximilyin/gateway/internal/middleware"
 	"github.com/maximilyin/gateway/internal/proxy"
 	"github.com/maximilyin/gateway/internal/ratelimit"
@@ -42,8 +43,13 @@ func New(cfg *config.Config, logger *slog.Logger, opts ...Option) (*Gateway, err
 		opt(&o)
 	}
 
+	reg := metrics.New()
+	responses := reg.Counter("gateway_http_responses_total", "HTTP responses served by this process, by status code.")
+	limited := reg.Counter("gateway_rate_limit_rejected_total", "Requests rejected by a rate limit, by policy name.")
+	breakerRejected := reg.Counter("gateway_circuit_breaker_rejected_total", "Requests refused because the circuit breaker would not forward them, by upstream.")
+
 	// One proxy per upstream, so all routes to the same service share one
-	// connection pool.
+	// connection pool and one breaker.
 	proxies := make(map[string]*proxy.Proxy, len(cfg.Upstreams))
 	for name, u := range cfg.Upstreams {
 		target, err := config.ParseUpstreamURL(u.URL)
@@ -56,12 +62,25 @@ func New(cfg *config.Config, logger *slog.Logger, opts ...Option) (*Gateway, err
 			OpenTimeout:      bc.OpenTimeout,
 			HalfOpenMax:      bc.HalfOpenMax,
 		}, o.clock, logger.With("upstream", name))
-		proxies[name] = proxy.New(target, u.Timeout, logger.With("upstream", name), br)
+		upstream := name
+		reg.Gauge("gateway_circuit_breaker_state",
+			"Circuit breaker state by upstream: 0 is closed, 1 is half-open, 2 is open.",
+			map[string]string{"upstream": upstream},
+			func() float64 { return breakerState(br.State()) },
+		)
+		p := proxy.New(target, u.Timeout, logger.With("upstream", upstream), br)
+		p.SetOnBreakerReject(func() {
+			breakerRejected.Inc(map[string]string{"upstream": upstream})
+		})
+		proxies[upstream] = p
 	}
 
 	// Both stores start a sweeper goroutine. Close them if a later step fails.
 	sc := cfg.Sessions
 	store := session.NewMemoryStore(o.clock, sc.MaxSessions, sc.CleanupInterval)
+	reg.Gauge("gateway_sessions", "Sessions stored in this process, including expired ones not yet deleted.", nil, func() float64 {
+		return float64(store.Len())
+	})
 	manager := session.NewManager(store, o.clock, session.Config{TTL: sc.TTL, MaxLifetime: sc.MaxLifetime})
 	sessions := session.NewHTTP(manager, sc.Header, logger)
 
@@ -72,6 +91,9 @@ func New(cfg *config.Config, logger *slog.Logger, opts ...Option) (*Gateway, err
 		named[name] = limitOf(lim)
 	}
 	limits := ratelimit.New(buckets, limitOf(rcfg.Global), limitOf(rcfg.Default), limitOf(rcfg.SessionIssue), named, logger)
+	limits.SetOnReject(func(policy string) {
+		limited.Inc(map[string]string{"policy": policy})
+	})
 	// Issuance is limited by IP. The explicit POST also spends one global token.
 	// An API request that has to create a session spends the issuance token here
 	// and the global token later, together with the route policy.
@@ -121,6 +143,7 @@ func New(cfg *config.Config, logger *slog.Logger, opts ...Option) (*Gateway, err
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", g.healthz)
 	mux.HandleFunc("GET /readyz", g.readyz)
+	mux.Handle("GET /metrics", reg)
 	mux.HandleFunc("POST "+sc.Endpoint, sessions.Issue)
 	mux.Handle("GET "+sc.Endpoint, limits.IP("default", http.HandlerFunc(sessions.Info)))
 	mux.Handle("DELETE "+sc.Endpoint, limits.IP("default", http.HandlerFunc(sessions.Revoke)))
@@ -128,6 +151,7 @@ func New(cfg *config.Config, logger *slog.Logger, opts ...Option) (*Gateway, err
 
 	g.handler = middleware.Chain(mux,
 		middleware.RequestID,
+		metrics.ObserveStatus(responses),
 		middleware.AccessLog(logger),
 		middleware.Recover(logger),
 	)
@@ -159,6 +183,22 @@ func limitMisses(rt *router.Router, limits *ratelimit.Limiter) http.Handler {
 
 func limitOf(c config.RateLimitConfig) ratelimit.Limit {
 	return ratelimit.Limit{RPS: c.RPS, Burst: float64(c.Burst)}
+}
+
+// breakerState maps the breaker onto a gauge a scrape can plot: a higher number
+// is a worse state. Reading the state also lets an open breaker whose timeout
+// has elapsed become half-open, which the next request would do anyway.
+func breakerState(s breaker.State) float64 {
+	switch s {
+	case breaker.Closed:
+		return 0
+	case breaker.HalfOpen:
+		return 1
+	case breaker.Open:
+		return 2
+	default:
+		return -1
+	}
 }
 
 // SetReady switches /readyz between 200 and 503. It is flipped to false at the

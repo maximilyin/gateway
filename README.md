@@ -63,7 +63,7 @@ Limits are token buckets. `burst` is how many requests can pass immediately. `rp
 | `default` | client IP | a path that matches no route, and `GET` or `DELETE` of the session endpoint |
 | `session_issue` | client IP | creating a session |
 
-`GET /healthz` and `GET /readyz` are not limited.
+`GET /healthz`, `GET /readyz`, and `GET /metrics` are not limited.
 
 Buckets live in process memory. One unused for `idle_ttl` is deleted, and the next request starts from a full bucket. `max_keys` caps how many buckets are stored; past that, a new key returns `503`.
 
@@ -77,10 +77,25 @@ Each upstream has one breaker, shared by every route that forwards to it.
 
 The breaker lives in process memory. A restart starts it closed.
 
+## Metrics
+
+`GET /metrics` prints counters and gauges as Prometheus text. `curl` that URL to see the process as it is now. A Prometheus server can scrape the same URL later and keep history. Grafana is only a dashboard on top of that history; nothing here starts either of them.
+
+| Metric | Meaning |
+|---|---|
+| `gateway_http_responses_total{code}` | Responses since the process started, by status code |
+| `gateway_rate_limit_rejected_total{policy}` | Requests rejected with `429`, by policy name |
+| `gateway_circuit_breaker_rejected_total{upstream}` | Requests refused because the breaker would not forward them |
+| `gateway_circuit_breaker_state{upstream}` | `0` closed, `1` half-open, `2` open |
+| `gateway_sessions` | Sessions in memory, including expired ones not yet deleted |
+
+A scrape reads the breaker state. If the open timeout has already elapsed, that read moves the breaker to half-open, the same way the next client request would. It does not call the upstream.
+
 ## Operations
 
 - `GET /healthz` — the process is up. Always `200`.
 - `GET /readyz` — `200` while the gateway accepts traffic, `503` during shutdown.
+- `GET /metrics` — counters and gauges for this process. See [Metrics](#metrics).
 - Every request has an `X-Request-ID`. A valid client value is kept; otherwise a new one is generated. It is on the response, in the logs, and on the upstream request.
 - A body larger than `server.max_body_bytes` returns `413`.
 - No connection to the upstream returns `502`. An upstream timeout returns `504`.
